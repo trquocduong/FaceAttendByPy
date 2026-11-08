@@ -1,107 +1,55 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from io import BytesIO
+import gc
 import face_recognition
-import shutil
-import tempfile
-import os
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import numpy as np
+from PIL import Image
+import requests  # Thay thế urllib bằng requests
 
 app = FastAPI()
-
-print("athor: TranQuocDuong")
-
-
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok"
-    }
 
 
 @app.post("/api/verify-face")
 async def verify_face(
-    profile_image: UploadFile = File(...),
-    camera_image: UploadFile = File(...)
+    profile_image_url: str = Form(...), camera_image: UploadFile = File(...)
 ):
-    profile_path = None
-    camera_path = None
+    img_profile = None
+    img_camera = None
+    encodings_profile = None
+    encodings_camera = None
 
     try:
-        # Tạo file tạm an toàn
-        profile_file = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".jpg"
-        )
+        response = requests.get(profile_image_url, timeout=10)
+        response.raise_for_status()
 
-        camera_file = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".jpg"
-        )
+        pil_image = Image.open(BytesIO(response.content)).convert("RGB")
+        img_profile = np.array(pil_image)
 
-        profile_path = profile_file.name
-        camera_path = camera_file.name
+        camera_bytes = await camera_image.read()
+        img_camera = face_recognition.load_image_file(BytesIO(camera_bytes))
 
-        profile_file.close()
-        camera_file.close()
+        encodings_profile = face_recognition.face_encodings(img_profile)
+        encodings_camera = face_recognition.face_encodings(img_camera)
 
-        # Lưu ảnh profile
-        with open(profile_path, "wb") as buffer:
-            shutil.copyfileobj(
-                profile_image.file,
-                buffer
-            )
+        if len(encodings_profile) == 0:
+            return {"match": False, "message": "Ảnh profile không có mặt!"}
 
-        # Lưu ảnh camera
-        with open(camera_path, "wb") as buffer:
-            shutil.copyfileobj(
-                camera_image.file,
-                buffer
-            )
+        if len(encodings_camera) == 0:
+            return {"match": False, "message": "Camera không bắt được mặt!"}
 
-        # Load ảnh
-        img1 = face_recognition.load_image_file(
-            profile_path
-        )
-
-        img2 = face_recognition.load_image_file(
-            camera_path
-        )
-
-        # Encode khuôn mặt
-        encodings1 = face_recognition.face_encodings(img1)
-        encodings2 = face_recognition.face_encodings(img2)
-
-        if len(encodings1) == 0:
-            return {
-                "match": False,
-                "message": "Không tìm thấy khuôn mặt trong ảnh profile!"
-            }
-
-        if len(encodings2) == 0:
-            return {
-                "match": False,
-                "message": "Không tìm thấy khuôn mặt trong ảnh camera!"
-            }
-
-        # So sánh
         results = face_recognition.compare_faces(
-            [encodings1[0]],
-            encodings2[0],
-            tolerance=0.5
+            [encodings_profile[0]], encodings_camera[0], tolerance=0.5
         )
 
-        return {
-            "match": bool(results[0])
-        }
+        return {"match": bool(results[0])}
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+        print(f"❌ Lỗi xử lý khuôn mặt: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        # Luôn xóa file tạm
-        if profile_path and os.path.exists(profile_path):
-            os.remove(profile_path)
-
-        if camera_path and os.path.exists(camera_path):
-            os.remove(camera_path)
+        try:
+            del img_profile, img_camera, encodings_profile, encodings_camera
+        except NameError:
+            pass
+        gc.collect()
